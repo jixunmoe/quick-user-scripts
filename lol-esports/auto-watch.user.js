@@ -3,12 +3,18 @@
 // @namespace   uk.jixun
 // @match       https://lolesports.com/*
 // @grant       none
-// @version     1.0
+// @version     1.0.1
 // @author      Jixun
 // @license     MIT
-// @description Auto watch and next. For the rewards.
+// @description Auto watch/skip and get rewards.
 // @run-at      document-start
 // ==/UserScript==
+
+////////////////////////////////////////////////////////////
+// Change log
+// v1.0        Initial version.
+// v1.0.1      Broken stream detection (and skip if found).
+////////////////////////////////////////////////////////////
 
 // Enter debug mode?
 const debugHelper = false;
@@ -240,19 +246,36 @@ async function autoPlayVideo(url) {
   log.info('start: videoId: ' + videoId + '; matchId: ' + matchId);
 
   router.redirect(url);
-  while(true) {
+
+  // Check if we have the parameter.
+  await sleep(30 * 1000);
+  // If we are on the right track, we should have "parameter" injected to current url.
+  if (!/^\/vod\/\d+\/\d\/.{3,}$/.test(location.pathname)) {
+    log.error('could not find video parameter in URL (failed to fetch stream?), skip.');
+    return;
+  }
+
+  // For each video, try 30 mins max.
+  let success = false;
+  for(let i = 0; i < 6; i++) {
     await sleep5m();
 
     // invalidate cache
     rewardsWatchHistory.watchHistoryPromise = null;
     const watchHistory = await rewardsWatchHistory.fetchWatchHistory(tid);
     if (watchHistory[videoId]) {
-      log.info('video reward ok, next...');
+      success = true;
       break;
     }
     log.info('not ready, wait...');
   }
-  await sleep5m();
+
+  if (success) {
+    log.info('video reward ok. Take a break before next video...');
+    await sleep5m();    
+  } else {
+    log.error('could not get video reward for this video. skip.');
+  }
 }
 
 function getIcon(name) {
