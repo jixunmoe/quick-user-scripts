@@ -3,21 +3,29 @@
 // @namespace   uk.jixun
 // @match       https://lolesports.com/*
 // @grant       none
-// @version     1.0.1
+// @version     1.1.0
 // @author      Jixun
 // @license     MIT
 // @description Auto watch/skip and get rewards.
 // @run-at      document-start
 // ==/UserScript==
 
-////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // Change log
 // v1.0        Initial version.
 // v1.0.1      Broken stream detection (and skip if found).
-////////////////////////////////////////////////////////////
+// v1.1.0      Don't rely on class name detection provided in the APP, fetch them from the server instead.
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
+// Constants
 // Enter debug mode?
 const debugHelper = false;
+
+// Global variables
+// Have we started?
+let working = false;
+
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 const getLogger = (() => {
   const LogLevel = {
@@ -80,37 +88,6 @@ const TAG = 'Aut0Watch3r';
 const log = getLogger(TAG);
 
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-// LOL eSports - React Web APP API/Modules
-
-let router;
-let relApi;
-let rewardsWatchHistory;
-
-// React Router Redirect
-function redirect(path) {
-  if (router) {
-    router.redirect(path);
-  }
-}
-
-/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-
-const eventAppNavigate = `${TAG}-${Math.random()}`;
-(() => {
-  const replaceState = history.replaceState;
-
-  history.replaceState = (function (state, title, url) {
-    const event = new CustomEvent(eventAppNavigate, { detail: { state, title, url } });
-    window.dispatchEvent(event);
-
-    return replaceState.apply(this, arguments);
-  }).bind(history);
-
-  window.addEventListener(eventAppNavigate, ({detail: {state, title, url}}) => {
-    log.info("location: " + document.location + ", url: " + url + ", state: " + JSON.stringify(state));
-  });
-})();
-
 
 function h(tag, attr, children) {
   const el = document.createElement(tag);
@@ -127,23 +104,69 @@ function h(tag, attr, children) {
   return el;
 }
 
-function injectToWebPack() {
-  return new Promise((resolve) => {
-    const id = `jixun: ${Math.random()}`;
-    const CHUNK_MAIN = 3;
-    (window.webpackJsonp = window.webpackJsonp || []).push([
-      [/* Inject to Webpack Runtime :D */],
-      {
-      [id]: function (module, exports, require) {
-        const idx = webpackJsonp.findIndex(x => x[1][id]);
-        webpackJsonp.splice(idx, 1);
-        resolve([module, exports, require]);
-      },
-      },
-      [[id, CHUNK_MAIN]]
-    ]);
-  });
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+let __yt;
+Object.defineProperty(window, 'YT', {
+  get: () => __yt,
+  set: (YT) => {
+    __yt = YT;
+    
+    let playerFn;
+    Object.defineProperty(YT, 'Player', {
+      get: () => playerFn,
+      set: (newPlayerFn) => {
+        playerFn = function (a, b) {
+          if (working) {
+            Object.assign(document.getElementById(a).style, { width: '256px', height: '144px' });
+            Object.assign(b || {}, { height: 144, width: 256 });
+          }
+          const player = new newPlayerFn(a, b);
+          player.addEventListener('onReady', () => {
+            player.mute();
+          });
+          return player;
+        };
+        Object.assign(playerFn, newPlayerFn);
+      }
+    });
+  }
+});
+
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+// Hook raf fn to keep events called in background.
+
+const raf = window.requestAnimationFrame;
+const caf = window.cancelAnimationFrame;
+window.requestAnimationFrame = fn => {
+  if (working) {
+    // simulate 10fps
+    return setTimeout(fn, 100);
+  } else {
+    return raf(fn);
+  }
+};
+window.cancelAnimationFrame = id => {
+  caf(id);
+  clearTimeout(id);
 }
+
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// LOL eSports - React Web APP API/Modules
+
+let router;
+let relApi;
+let rewardsWatchHistory;
+
+// React Router Redirect
+function redirect(path) {
+  if (router) {
+    router.redirect(path);
+  }
+}
+
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 // Icons from css.gg
 const iconSvg = {
@@ -200,41 +223,82 @@ button.gg-icon {
 
 `]));
 
-// vods {
-//   [tournamentId]: tournament
-// }
-const vods = new Map();
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+function injectToWebPack() {
+  return new Promise((resolve) => {
+    const id = `jixun: ${Math.random()}`;
+    const CHUNK_MAIN = 3;
+    (window.webpackJsonp = window.webpackJsonp || []).push([
+      [/* Inject to Webpack Runtime :D */],
+      {
+      [id]: function (module, exports, require) {
+        const idx = webpackJsonp.findIndex(x => x[1][id]);
+        webpackJsonp.splice(idx, 1);
+        resolve([module, exports, require]);
+      },
+      },
+      [[id, CHUNK_MAIN]]
+    ]);
+  });
+}
+
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 const sleep = (t) => new Promise(resolve => setTimeout(resolve, t));
 const sleep5m = () => sleep(5 * 60 * 1000);
 
-async function fetchMatchInfo(matchId) {
-  for(const [tid, tVid] of vods) {
-    for(const t of tVid) {
-      if (t.match.id === matchId) {
-        return [t.games, tid];
-      }
-    }
-  }
-  
-  // Not found, we need to update our information...
-  log.info('Get tournament information...');
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+// vods { [matchId]: { startTime, games, ... } }
+const vods = new Map();
+const tournaments = new Map();
+
+async function fetchTournamentId(matchId) {
   const tournamentDetails = await relApi.fetchEventDetails(matchId);
-  const tid = tournamentDetails.tournament.id;
-  const tVod = await relApi.fetchVods(tid);
-  vods.set(tid, tVod);
-  
-  for(const t of tVod) {
-    if (t.match.id === matchId) {
-      return [t.games, tid];
-    }
+  return tournamentDetails.tournament.id;
+}
+
+async function getTournamentVods(tid) {
+  if (tournaments.has(tid)) {
+    return tournaments.get(tid) || null;
+  }
+  const tVods = [...await relApi.fetchVods(tid)].map((vod) => ({
+    ...vod,
+    tid,
+    startTime: new Date(vod.startTime),
+  })).sort((a, b) => b.startTime - a.startTime);
+  tournaments.set(tid, tVods);
+  return tVods;
+}
+
+async function fetchVods(matchId) {
+  if (vods.has(matchId)) {
+    return vods.get(matchId) || null;
   }
   
-  return null;
+  const tid = await fetchTournamentId(matchId);
+  const tVods = await getTournamentVods(tid);
+  for (const vod of tVods) {
+    vods.set(vod.match.id, vod);
+  }
+
+  return vods.get(matchId) || null;
+}
+
+async function fetchMatchInfo(matchId) {
+  const vod = await fetchVods(matchId);
+  if (!vod) return null;
+  return [vod.games, vod.tid];
+}
+
+function splitVodUrl(url) {
+  const [, matchId, gameId] = url.match(/\/vod\/(\d+)\/(\d+)/);
+  return [matchId, gameId];
 }
 
 async function autoPlayVideo(url) {
-  const [, matchId, gameId] = url.match(/\/vod\/(\d+)\/(\d+)/);
+  const [matchId, gameId] = splitVodUrl(url);
   const [matchInfo, tid] = await fetchMatchInfo(matchId);
   
   if (!matchInfo) {
@@ -248,7 +312,7 @@ async function autoPlayVideo(url) {
   router.redirect(url);
 
   // Check if we have the parameter.
-  await sleep(30 * 1000);
+  await sleep(5 * 1000);
   // If we are on the right track, we should have "parameter" injected to current url.
   if (!/^\/vod\/\d+\/\d\/.{3,}$/.test(location.pathname)) {
     log.error('could not find video parameter in URL (failed to fetch stream?), skip.');
@@ -261,7 +325,7 @@ async function autoPlayVideo(url) {
     await sleep5m();
 
     // invalidate cache
-    rewardsWatchHistory.watchHistoryPromise = null;
+    rewardsWatchHistory.reset();
     const watchHistory = await rewardsWatchHistory.fetchWatchHistory(tid);
     if (watchHistory[videoId]) {
       success = true;
@@ -295,35 +359,35 @@ function $$(selector, map = identity) {
   return Array.from(document.querySelectorAll(selector), map);
 }
 
-// Have we started?
-let working = false;
-
-let __yt;
-Object.defineProperty(window, 'YT', {
-  get: () => __yt,
-  set: (YT) => {
-    __yt = YT;
-    
-    let playerFn;
-    Object.defineProperty(YT, 'Player', {
-      get: () => playerFn,
-      set: (newPlayerFn) => {
-        playerFn = function (a, b) {
-          if (working) {
-            Object.assign(document.getElementById(a).style, { width: '256px', height: '144px' });
-            Object.assign(b || {}, { height: 144, width: 256 });
-          }
-          const player = new newPlayerFn(a, b);
-          player.addEventListener('onReady', () => {
-            player.mute();
-          });
-          return player;
-        };
-        Object.assign(playerFn, newPlayerFn);
-      }
-    });
+async function getVodLinksForRewards() {
+  const games = $$('.VodsList .VodsGameSelector');
+  if (games.length === 0) {
+    return [];
   }
-});
+
+  // The first game of the last "Best Of N" in the last of the list, must be able to query its tournament id
+  const url = games[games.length - 1].querySelector('a.game').getAttribute('href');
+  const [matchId] = splitVodUrl(url);
+
+  const tid = await fetchTournamentId(matchId);
+  const tVods = await getTournamentVods(tid);
+  const watchHistory = await rewardsWatchHistory.fetchWatchHistory(tid);
+  const vodForRewards = [];
+  
+  for(const vod of tVods) {
+    for(const [i, game] of vod.games.entries()) {
+      // Needs to be completed for VOD watch.
+      if (game.state !== 'completed' || game.vods.length === 0) break;
+
+      // Reward for this vod already claimed
+      if (watchHistory[game.id]) break;
+
+      vodForRewards.push(`/vod/${vod.match.id}/${i + 1}`);
+    }
+  }
+
+  return vodForRewards;
+}
 
 function main() {
   const autoPlayIcon = getIconButton('play-button-o');
@@ -331,7 +395,7 @@ function main() {
     'class': 'riotbar-navmenu-right-icon jx-auto-play'
   }, [autoPlayIcon]);
   autoPlayIcon.onclick = async () => {
-    const links = $$('.VodsGameSelector .game:not(.not-played):not(.watched)', x => x.href.replace(/^.+?com\//, '/'));
+    const links = await getVodLinksForRewards();
     
     if (links.length === 0) {
       alert('Nothing to watch.\nNavigate to one of the "VODS" page!');
