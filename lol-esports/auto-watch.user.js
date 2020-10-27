@@ -17,6 +17,8 @@
 // v1.1.0      Don't rely on class name detection provided in the APP, fetch them from the server instead.
 // v1.1.1      Only mute if we enabled auto-play.
 // v1.1.2      Auto-play with speed 1.5
+// v1.1.3      Reward check interval changed to 15 mins
+// v1.1.4      Auto-play with speed 1.25; timeout changed to 45 mins
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 // Constants
@@ -127,7 +129,7 @@ Object.defineProperty(window, 'YT', {
           if (working) {
             player.addEventListener('onReady', () => {
               player.mute();
-              player.setPlaybackRate(1.5);
+              player.setPlaybackRate(1.25);
             });
           }
           return player;
@@ -252,6 +254,7 @@ function injectToWebPack() {
 
 const sleep = (t) => new Promise(resolve => setTimeout(resolve, t));
 const sleep5m = () => sleep(5 * 60 * 1000);
+const sleep15m = () => sleep(15 * 60 * 1000);
 
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -324,10 +327,10 @@ async function autoPlayVideo(url) {
     return;
   }
 
-  // For each video, try 30 mins max.
+  // For each video, try 45 mins max.
   let success = false;
-  for(let i = 0; i < 6; i++) {
-    await sleep5m();
+  for(let i = 0; i < 3; i++) {
+    await sleep15m();
 
     // invalidate cache
     rewardsWatchHistory.reset();
