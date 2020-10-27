@@ -3,7 +3,7 @@
 // @namespace   uk.jixun
 // @match       https://lolesports.com/*
 // @grant       none
-// @version     1.1.1
+// @version     1.1.2
 // @author      Jixun
 // @license     MIT
 // @description Auto watch/skip and get rewards.
@@ -16,6 +16,7 @@
 // v1.0.1      Broken stream detection (and skip if found).
 // v1.1.0      Don't rely on class name detection provided in the APP, fetch them from the server instead.
 // v1.1.1      Only mute if we enabled auto-play.
+// v1.1.2      Auto-play with speed 1.5
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 // Constants
@@ -126,6 +127,7 @@ Object.defineProperty(window, 'YT', {
           if (working) {
             player.addEventListener('onReady', () => {
               player.mute();
+              player.setPlaybackRate(1.5);
             });
           }
           return player;
